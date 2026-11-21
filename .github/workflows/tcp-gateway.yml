@@ -1,0 +1,96 @@
+name: TCP Gateway
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    name: Starter tools and test harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -race -count=1 ./...
+      - run: go vet ./...
+      - name: Check Go formatting
+        run: |
+          files="$(gofmt -l challenges/tcp-gateway)"
+          if [ -n "$files" ]; then
+            printf 'Run gofmt on:\n%s\n' "$files"
+            exit 1
+          fi
+
+  discover:
+    name: Discover changed submissions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.submissions.outputs.matrix }}
+      has_submissions: ${{ steps.submissions.outputs.has_submissions }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: submissions
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: go run ./challenges/tcp-gateway/cmd/submissions --base "$BASE_SHA" --output "$GITHUB_OUTPUT"
+
+  acceptance:
+    name: Acceptance (${{ matrix.submission }})
+    needs: [tools, discover]
+    if: needs.discover.outputs.has_submissions == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Run required acceptance tests
+        env:
+          SUBMISSION: ${{ matrix.submission }}
+        run: |
+          export GATEWAY_SUBMISSION="$GITHUB_WORKSPACE/$SUBMISSION"
+          go test -count=1 -timeout=5m -v ./challenges/tcp-gateway/acceptance
+
+  required:
+    name: TCP Gateway required checks
+    if: always()
+    needs: [tools, discover, acceptance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require tools and applicable submissions to pass
+        env:
+          TOOLS_RESULT: ${{ needs.tools.result }}
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          ACCEPTANCE_RESULT: ${{ needs.acceptance.result }}
+          HAS_SUBMISSIONS: ${{ needs.discover.outputs.has_submissions }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          test "$TOOLS_RESULT" = success
+          if [ "$EVENT_NAME" = pull_request ]; then
+            test "$DISCOVER_RESULT" = success
+            if [ "$HAS_SUBMISSIONS" = true ]; then
+              test "$ACCEPTANCE_RESULT" = success
+            fi
+          fi
