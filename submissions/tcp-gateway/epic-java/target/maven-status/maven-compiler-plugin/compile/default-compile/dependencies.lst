@@ -1,0 +1,5 @@
+classpath:/Users/jacky/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.23.0/jackson-databind-2.23.0.jar	1716668:1794098121000
+classpath:/Users/jacky/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.23/jackson-annotations-2.23.jar	84212:1794095929000
+classpath:/Users/jacky/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.23.0/jackson-core-2.23.0.jar	603520:1794096903000
+classpath:/Users/jacky/.m2/repository/org/projectlombok/lombok/1.18.48/lombok-1.18.48.jar	2055065:1788295256000
+classpath:/Users/jacky/.m2/repository/jakarta/validation/jakarta.validation-api/3.1.1/jakarta.validation-api-3.1.1.jar	106136:1738452882000

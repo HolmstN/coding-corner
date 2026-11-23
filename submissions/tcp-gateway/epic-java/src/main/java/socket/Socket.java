@@ -28,7 +28,7 @@ public class Socket{
     static {
         try {
             userSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9001"));
-            orderSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9001"));
+            orderSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9002"));
         } catch (IOException e) {
             log.log(Level.WARNING, "Could not create socket");
             throw new RuntimeException(e);
