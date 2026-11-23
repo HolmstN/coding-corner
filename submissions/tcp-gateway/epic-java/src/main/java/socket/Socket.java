@@ -65,7 +65,7 @@ public class Socket{
         BufferedReader readDestination = null;
         Target destination = request.getTarget();
         ObjectMapper mapper = new ObjectMapper();
-        if (destination == Target.user){
+        if (destination == Target.users){
             writeDestination = userSocket.getOutputStream();
             readDestination = new BufferedReader(new InputStreamReader(userSocket.getInputStream()));
         }
