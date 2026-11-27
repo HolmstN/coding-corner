@@ -78,6 +78,7 @@ public class Socket{
     }
 
     Runnable _routingRequest(Request request, java.net.Socket connection) throws IOException {
+        connection.setSoTimeout(3000);
 
             DataOutputStream writeDestination = null;
             DataInputStream readDestination = null;
@@ -115,7 +116,6 @@ public class Socket{
 
                 connection.getOutputStream().write(responseBytes);
                 connection.getOutputStream().flush();
-                connection.close();
             }
         } catch (IOException e) {
             backendConnection.close();
@@ -128,7 +128,6 @@ public class Socket{
             connection.getOutputStream().write(frame);
 
             connection.close();
-
         }
 
         return null;
