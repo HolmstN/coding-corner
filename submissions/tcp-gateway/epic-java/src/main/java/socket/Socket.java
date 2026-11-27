@@ -1,5 +1,9 @@
 package socket;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.exc.StreamReadException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DatabindException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
@@ -11,7 +15,10 @@ import model.Target;
 
 import java.io.*;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -19,38 +26,49 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class Socket{
-    private int port;
-
     private static final Logger log = Logger.getLogger(Socket.class.getName());
-    static java.net.Socket userSocket;
-    static java.net.Socket orderSocket;
 
-    static {
+    static Map<String, Object> router = new HashMap<>();
+
+
+    public static void main(String[] args)  {
+        int port;
+
+        String routerFile = System.getenv("GATEWAY_ROUTES");
+
+        ObjectMapper mapper = new ObjectMapper();
         try {
-            userSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9001"));
-            orderSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9002"));
+            router = mapper.readValue(new File(routerFile), new TypeReference<Map<String, Object>>(){});
+        } catch (StreamReadException e) {
+            throw new RuntimeException(e);
+        } catch (DatabindException e) {
+            throw new RuntimeException(e);
         } catch (IOException e) {
-            log.log(Level.WARNING, "Could not create socket");
             throw new RuntimeException(e);
         }
-    }
 
-    public void main(String[] args) {
+
+        try {
+            port = Integer.parseInt(System.getProperty("port"));
+        } catch (Error e) {
+            log.log(Level.SEVERE, e.getMessage(), e);
+            port = Integer.parseInt(args[0]);
+        }
 
         if (args.length < 1){
             throw new IllegalArgumentException();
         }
 
-        this.port = Integer.parseInt(args[0]);
-        log.info("Socket listening on port " + this.port);
 
+        Socket gateway = new Socket();
 
         ExecutorService threadPool =  Executors.newCachedThreadPool();
 
         try (ServerSocket serverSocket = new ServerSocket(port)){
+            log.info("Socket listening on port " + serverSocket.getLocalPort());
             while (true){
                 java.net.Socket client_connection = serverSocket.accept();
-                threadPool.execute(_handleRequest(client_connection));
+                threadPool.execute(gateway._handleRequest(client_connection));
             }
 
         } catch (IOException e) {
@@ -60,38 +78,55 @@ public class Socket{
 
     }
 
-    Runnable _routingRequest(Request request, java.net.Socket connection) throws IOException {
-        OutputStream writeDestination = null;
-        BufferedReader readDestination = null;
-        Target destination = request.getTarget();
+    byte[] _getByteFrame(Object data) throws JsonProcessingException {
         ObjectMapper mapper = new ObjectMapper();
-        if (destination == Target.users){
-            writeDestination = userSocket.getOutputStream();
-            readDestination = new BufferedReader(new InputStreamReader(userSocket.getInputStream()));
+        try {
+            byte[] requestBytes = mapper.writeValueAsBytes(data);
+            // Hard coding length header frame size
+            byte[] size = ByteBuffer.allocate(4).putInt(requestBytes.length).array();
+            return ByteBuffer.allocate(requestBytes.length + size.length).put(size).put(requestBytes).array();
+        } catch (Error e) {
+            throw new RuntimeException(e);
         }
+    }
 
-        if (destination == Target.orders){
-            writeDestination = orderSocket.getOutputStream();
 
-            readDestination = new BufferedReader(new InputStreamReader(orderSocket.getInputStream()));
-        }
 
-        if (writeDestination == null || readDestination == null){
-            log.log(Level.WARNING, " stream not matched");
-            throw new IllegalArgumentException();
-        }
+    Runnable _routingRequest(Request request, java.net.Socket connection) throws IOException {
 
-        writeDestination.write(mapper.writeValueAsBytes(request));
+        DataOutputStream writeDestination = null;
+        DataInputStream readDestination = null;
+
+        String target = request.getTarget();
+
+        String[] route = router.get(target).toString().split(":");
+
+        String host = route[0];
+        String port = route[1];
+
+        java.net.Socket backendConnection = new java.net.Socket(host, Integer.parseInt(port));
+
+
+        writeDestination = new DataOutputStream(backendConnection.getOutputStream());
+        readDestination = new DataInputStream(backendConnection.getInputStream());
+
+        byte[] requestByte = _getByteFrame(request);
+        writeDestination.write(requestByte);
         writeDestination.flush();
 
 
-        String raw_response = readDestination.readLine();
-        if (raw_response == null){
+        int rawSize= readDestination.readInt();
+        byte[] rawResponse = new byte[rawSize];
+        readDestination.readFully(rawResponse);
+        // Fix this later
+        if (rawResponse == null){
             log.log(Level.WARNING, " response not matched");
         } else {
-            Response response = mapper.readValue(raw_response, Response.class);
+            Response response = mapper.readValue(rawResponse, Response.class);
+            byte[] responseBytes = _getByteFrame(response);
 
-            connection.getOutputStream().write(mapper.writeValueAsBytes(response));
+            connection.getOutputStream().write(responseBytes);
+            connection.getOutputStream().flush();
         }
 
         return null;
@@ -102,15 +137,18 @@ public class Socket{
 
             DataInputStream stream= new DataInputStream(client_connection.getInputStream());
             int size = stream.readInt();
+
             if (!(1 <= size && size <= 1048576)){
                 log.log(Level.WARNING, " size not matched");
                 client_connection.close();
             }
-            byte[] raw_request = new byte[size];
-            stream.readFully(raw_request);
+
+            byte[] rawRequestJson = new byte[size];
+            stream.readFully(rawRequestJson);
+
             // Creating the request object
             ObjectMapper mapper = new ObjectMapper();
-            Request request = mapper.readValue(raw_request, Request.class);
+            Request request = mapper.readValue(rawRequestJson, Request.class);
             // Keeping track of the error a bit more
             ArrayList<String> errors = new ArrayList<>();
 
@@ -124,18 +162,20 @@ public class Socket{
                 }
 
             }
-            OutputStream outputStream = client_connection.getOutputStream();
 
+
+            DataOutputStream outputStream = new DataOutputStream(client_connection.getOutputStream());
             if (!errors.isEmpty()){
                 Response response = new Response();
                 response.setId(request.getId() != null ?  request.getId() : "No ID");
                 response.setBody(errors.toString());
                 response.setStatus("error");
-                outputStream.write(mapper.writeValueAsBytes(response));
+
+                byte[] responseByte = _getByteFrame(response);
 
                 // Logging errors
                 log.log(Level.WARNING, "Error on request json", errors);
-
+                outputStream.write(responseByte);
                 outputStream.flush();
                 client_connection.close();
             }

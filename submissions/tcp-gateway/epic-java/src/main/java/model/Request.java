@@ -11,6 +11,6 @@ public class Request {
     @NotBlank
     private String id;
     @NotBlank
-    private Target target;
+    private String target;
     private String body;
 }
