@@ -16,10 +16,7 @@ import model.Target;
 import java.io.*;
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Level;
@@ -33,8 +30,10 @@ public class Socket{
 
 
     public static void main(String[] args)  {
-        int port;
+        // Make this into a Config class later
 
+
+        // Router file
         String routerFile = System.getenv("GATEWAY_ROUTES");
 
         ObjectMapper mapper = new ObjectMapper();
@@ -44,13 +43,14 @@ public class Socket{
             throw new RuntimeException(e);
         }
 
+        // Port that it is running, making it running by the parameter
 
-        port = Integer.parseInt(args[0]);
+        // This code is freaking awful to look at, but want to write some more shorthand
 
+        int port = Integer.parseInt((args.length > 0) ? args[0] : Optional.ofNullable(System.getenv("GATEWAY_PORT")).orElse("7000"));
         Socket gateway = new Socket();
 
         ExecutorService threadPool =  Executors.newCachedThreadPool();
-
         try (ServerSocket serverSocket = new ServerSocket(port)){
             log.info("Socket listening on port " + serverSocket.getLocalPort());
             while (true){
@@ -78,8 +78,6 @@ public class Socket{
     }
 
     Runnable _routingRequest(Request request, java.net.Socket connection) throws IOException {
-        connection.setSoTimeout(3000);
-
             DataOutputStream writeDestination = null;
             DataInputStream readDestination = null;
 
@@ -103,10 +101,10 @@ public class Socket{
 
             readDestination = new DataInputStream(backendConnection.getInputStream());
 
-            int rawSize= readDestination.readInt();
+            int rawSize = readDestination.readInt();
             byte[] rawResponse = new byte[rawSize];
             readDestination.readFully(rawResponse);
-            // Fix this later
+
             if (rawResponse == null){
                 log.log(Level.WARNING, " response not matched");
             } else {
@@ -135,15 +133,16 @@ public class Socket{
 
     Runnable _handleRequest(java.net.Socket client_connection){
         try {
-
-            DataInputStream stream= new DataInputStream(client_connection.getInputStream());
+            client_connection.setSoTimeout(3000);
+            DataInputStream stream = new DataInputStream(client_connection.getInputStream());
             int size = stream.readInt();
 
             if (!(1 <= size && size <= 1048576)){
-                log.log(Level.WARNING, " size not matched");
+                log.log(Level.WARNING, "Size not supported");
                 client_connection.close();
             }
 
+            // Setting up the buffer for the request
             byte[] rawRequestJson = new byte[size];
             stream.readFully(rawRequestJson);
 
@@ -162,14 +161,12 @@ public class Socket{
                     }
                 }
                 log.log(Level.WARNING, errors.toString());
-
             }
 
 
             DataOutputStream outputStream = new DataOutputStream(client_connection.getOutputStream());
             if (!errors.isEmpty()){
                 Response response = new Response();
-                response.setId(request.getId() != null ?  request.getId() : "No ID");
                 response.setBody(errors.toString());
                 response.setStatus("error");
 
