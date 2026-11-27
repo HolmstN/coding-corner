@@ -29,6 +29,7 @@ public class Socket{
     private static final Logger log = Logger.getLogger(Socket.class.getName());
 
     static Map<String, Object> router = new HashMap<>();
+    Map<String, String> clients =  new HashMap<>();
 
 
     public static void main(String[] args)  {
@@ -39,26 +40,12 @@ public class Socket{
         ObjectMapper mapper = new ObjectMapper();
         try {
             router = mapper.readValue(new File(routerFile), new TypeReference<Map<String, Object>>(){});
-        } catch (StreamReadException e) {
-            throw new RuntimeException(e);
-        } catch (DatabindException e) {
-            throw new RuntimeException(e);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
 
 
-        try {
-            port = Integer.parseInt(System.getProperty("port"));
-        } catch (Error e) {
-            log.log(Level.SEVERE, e.getMessage(), e);
-            port = Integer.parseInt(args[0]);
-        }
-
-        if (args.length < 1){
-            throw new IllegalArgumentException();
-        }
-
+        port = Integer.parseInt(args[0]);
 
         Socket gateway = new Socket();
 
@@ -68,7 +55,7 @@ public class Socket{
             log.info("Socket listening on port " + serverSocket.getLocalPort());
             while (true){
                 java.net.Socket client_connection = serverSocket.accept();
-                threadPool.execute(gateway._handleRequest(client_connection));
+                threadPool.execute(() -> gateway._handleRequest(client_connection));
             }
 
         } catch (IOException e) {
@@ -90,43 +77,58 @@ public class Socket{
         }
     }
 
-
-
     Runnable _routingRequest(Request request, java.net.Socket connection) throws IOException {
 
-        DataOutputStream writeDestination = null;
-        DataInputStream readDestination = null;
+            DataOutputStream writeDestination = null;
+            DataInputStream readDestination = null;
 
-        String target = request.getTarget();
+            String target = request.getTarget();
 
-        String[] route = router.get(target).toString().split(":");
+            String[] route = router.get(target).toString().split(":");
 
-        String host = route[0];
-        String port = route[1];
+            String host = route[0];
+            String port = route[1];
 
-        java.net.Socket backendConnection = new java.net.Socket(host, Integer.parseInt(port));
+            java.net.Socket backendConnection = new java.net.Socket(host, Integer.parseInt(port));
+            backendConnection.setSoTimeout(3000);
+
+        try {
+            writeDestination = new DataOutputStream(backendConnection.getOutputStream());
+
+            byte[] requestByte = _getByteFrame(request);
+            writeDestination.write(requestByte);
+            writeDestination.flush();
 
 
-        writeDestination = new DataOutputStream(backendConnection.getOutputStream());
-        readDestination = new DataInputStream(backendConnection.getInputStream());
+            readDestination = new DataInputStream(backendConnection.getInputStream());
 
-        byte[] requestByte = _getByteFrame(request);
-        writeDestination.write(requestByte);
-        writeDestination.flush();
+            int rawSize= readDestination.readInt();
+            byte[] rawResponse = new byte[rawSize];
+            readDestination.readFully(rawResponse);
+            // Fix this later
+            if (rawResponse == null){
+                log.log(Level.WARNING, " response not matched");
+            } else {
+                ObjectMapper mapper = new ObjectMapper();
+                Response response = mapper.readValue(rawResponse, Response.class);
+                byte[] responseBytes = _getByteFrame(response);
 
+                connection.getOutputStream().write(responseBytes);
+                connection.getOutputStream().flush();
+                connection.close();
+            }
+        } catch (IOException e) {
+            backendConnection.close();
 
-        int rawSize= readDestination.readInt();
-        byte[] rawResponse = new byte[rawSize];
-        readDestination.readFully(rawResponse);
-        // Fix this later
-        if (rawResponse == null){
-            log.log(Level.WARNING, " response not matched");
-        } else {
-            Response response = mapper.readValue(rawResponse, Response.class);
-            byte[] responseBytes = _getByteFrame(response);
+            Response  response = new Response();
+            response.setStatus("error");
+            response.setId(request.getId());
 
-            connection.getOutputStream().write(responseBytes);
-            connection.getOutputStream().flush();
+            byte[] frame = _getByteFrame(response);
+            connection.getOutputStream().write(frame);
+
+            connection.close();
+
         }
 
         return null;
@@ -160,6 +162,7 @@ public class Socket{
                         errors.add(violation.getMessage());
                     }
                 }
+                log.log(Level.WARNING, errors.toString());
 
             }
 
@@ -179,6 +182,11 @@ public class Socket{
                 outputStream.flush();
                 client_connection.close();
             }
+
+            if (request.getId() != null && !clients.containsKey(request.getId())){
+                clients.put(request.getId(), client_connection.getRemoteSocketAddress().toString());
+            }
+
 
             _routingRequest(request, client_connection);
 
