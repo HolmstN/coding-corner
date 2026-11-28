@@ -5,6 +5,9 @@ import com.fasterxml.jackson.core.exc.StreamReadException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DatabindException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.cfg.CoercionAction;
+import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
+import com.fasterxml.jackson.databind.type.LogicalType;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -32,6 +35,7 @@ public class Socket {
 
     static int REQUEST_MIN_SIZE = 1;
     static int REQUEST_MAX_SIZE = 1048576;
+    static ObjectMapper mapper = new ObjectMapper();
 
     public static void main(String[] args) {
         // Make this into a Config class later
@@ -40,7 +44,7 @@ public class Socket {
         // Router file
         String routerFile = System.getenv("GATEWAY_ROUTES");
 
-        ObjectMapper mapper = new ObjectMapper();
+
         try {
             router = mapper.readValue(new File(routerFile), new TypeReference<Map<String, Object>>() {
             });
@@ -48,10 +52,21 @@ public class Socket {
             throw new RuntimeException(e);
         }
 
-
+        // Port
         if (args.length > 0) {
             PORT = Integer.parseInt(args[0]);
         }
+
+        // Setting up the mapper for request
+        var textual = mapper.coercionConfigFor(LogicalType.Textual);
+        for (CoercionInputShape shape : CoercionInputShape.values()) {
+            if (shape != CoercionInputShape.String) {
+                textual.setCoercion(shape, CoercionAction.Fail);
+            }
+        }
+
+
+
 
         ExecutorService threadPool = Executors.newCachedThreadPool();
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
@@ -61,7 +76,7 @@ public class Socket {
                 threadPool.execute(() -> {
                     try {
                         _handleRequest(client_connection);
-                    } catch (Error e) {
+                    } catch (Error | IOException e) {
                         log.log(Level.WARNING, "Socket accept failed", e);
                         try {
                             client_connection.close();
@@ -97,10 +112,15 @@ public class Socket {
     static void _routingRequest(Request request, java.net.Socket connection) throws IOException {
         DataOutputStream writeDestination;
         DataInputStream readDestination;
-
-        String target = request.getTarget();
-
-        String[] route = router.get(target).toString().split(":");
+        String[] route;
+        try {
+            String target = request.getTarget();
+            route = router.get(target).toString().split(":");
+        } catch (Error e) {
+            log.log(Level.WARNING, "Invalid target", e);
+            connection.close();
+            return;
+        }
 
         String host = route[0];
         String port = route[1];
@@ -143,7 +163,7 @@ public class Socket {
         }
     }
 
-    static void _handleRequest(java.net.Socket client_connection) {
+    static void _handleRequest(java.net.Socket client_connection) throws IOException {
         // The while loop outside only reads connections from a new client, doesn't take in account of an existing client since it is using the same tcp socket connection
         // Something I just missed
         while (client_connection.isConnected()) {
@@ -162,7 +182,6 @@ public class Socket {
                 stream.readFully(rawRequestJson);
 
                 // Creating the request object
-                ObjectMapper mapper = new ObjectMapper();
                 Request request = mapper.readValue(rawRequestJson, Request.class);
                 // Keeping track of the error a bit more
                 ArrayList<String> errors = new ArrayList<>();
@@ -192,6 +211,7 @@ public class Socket {
                     outputStream.write(responseByte);
                     outputStream.flush();
                     client_connection.close();
+                    return;
                 }
 
                 if (request.getId() != null && !clients.containsKey(request.getId())) {
@@ -204,6 +224,7 @@ public class Socket {
 
             } catch (Error | IOException e) {
                 log.log(Level.WARNING, "Socket accept failed", e);
+                client_connection.close();
             }
         }
     }
