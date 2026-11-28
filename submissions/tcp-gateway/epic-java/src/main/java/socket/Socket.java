@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.exc.StreamReadException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DatabindException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.cfg.CoercionAction;
 import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
@@ -16,7 +17,9 @@ import model.Request;
 import model.Response;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -30,8 +33,8 @@ public class Socket {
     static Map<String, Object> router = new HashMap<>();
     static Map<String, String> clients = new HashMap<>();
 
-    static int PORT = Integer.parseInt(Optional.ofNullable(System.getenv("GATEWAY_PORT")).orElse("7000"));
-    static int BACKEND_TIME_OUT= Integer.parseInt(Optional.ofNullable(System.getenv("GATEWAY_BACKEND_TIMEOUT_MS")).orElse("2000"));
+    static int PORT = Integer.parseInt(Optional.ofNullable(System.getenv("GATEWAY_PORT")).orElseThrow());
+    static int BACKEND_TIME_OUT= Integer.parseInt(Optional.ofNullable(System.getenv("GATEWAY_BACKEND_TIMEOUT_MS")).orElseThrow());
 
     static int REQUEST_MIN_SIZE = 1;
     static int REQUEST_MAX_SIZE = 1048576;
@@ -48,6 +51,19 @@ public class Socket {
         try {
             router = mapper.readValue(new File(routerFile), new TypeReference<Map<String, Object>>() {
             });
+
+            router.forEach((s, o) -> {
+                try {
+                    String[] address = o.toString().split(":");
+                    if (address.length != 2) {
+                        throw new Exception();
+                    }
+
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -59,11 +75,16 @@ public class Socket {
 
         // Setting up the mapper for request
         var textual = mapper.coercionConfigFor(LogicalType.Textual);
+        // Fails every single type that it sees for mapper unless it is string
         for (CoercionInputShape shape : CoercionInputShape.values()) {
+            // skips over string
             if (shape != CoercionInputShape.String) {
                 textual.setCoercion(shape, CoercionAction.Fail);
             }
         }
+
+        // fails on trailing data
+        mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
 
 
@@ -78,11 +99,6 @@ public class Socket {
                         _handleRequest(client_connection);
                     } catch (Error | IOException e) {
                         log.log(Level.WARNING, "Socket accept failed", e);
-                        try {
-                            client_connection.close();
-                        } catch (IOException ex) {
-                            log.log(Level.WARNING, "Socket close failed", ex);
-                        }
                     }
                 });
             }
@@ -96,42 +112,62 @@ public class Socket {
     }
 
 
-    static byte[] _getByteFrame(Object data) {
-        ObjectMapper mapper = new ObjectMapper();
+    static byte[] _getByteFrame(byte[] data) {
         try {
-            byte[] requestBytes = mapper.writeValueAsBytes(data);
-            // Hard coding length header frame size
-            byte[] size = ByteBuffer.allocate(4).putInt(requestBytes.length).array();
-            return ByteBuffer.allocate(requestBytes.length + size.length).put(size).put(requestBytes).array();
-        } catch (Error | JsonProcessingException e) {
+            byte[] size = ByteBuffer.allocate(4).putInt(data.length).array();
+            return ByteBuffer.allocate(data.length + size.length).put(size).put(data).array();
+        } catch (Error e) {
             log.log(Level.WARNING, "ByteFrame fail to create", e);
             return new byte[]{};
         }
     }
 
-    static void _routingRequest(Request request, java.net.Socket connection) throws IOException {
+    static void _routingRequest(Request request, java.net.Socket connection, byte[] rawRequest) throws IOException {
         DataOutputStream writeDestination;
         DataInputStream readDestination;
         String[] route;
         try {
             String target = request.getTarget();
             route = router.get(target).toString().split(":");
-        } catch (Error e) {
+        } catch (Error | Exception e) {
             log.log(Level.WARNING, "Invalid target", e);
-            connection.close();
+
+            Response response = new Response();
+            response.setStatus("error");
+            response.setId(request.getId());
+            response.setBody("backend issue" + e.getMessage());
+
+            byte[] frame = _getByteFrame(mapper.writeValueAsBytes(response));
+            connection.getOutputStream().write(frame);
+            connection.getOutputStream().flush();
+            return;
+        }
+
+        if (route.length != 2) {
+            log.log(Level.WARNING, "Invalid route length");
+            Response response = new Response();
+            response.setStatus("error");
+            response.setId(request.getId());
+            response.setBody("backend issue");
+
+            byte[] frame = _getByteFrame(mapper.writeValueAsBytes(response));
+            connection.getOutputStream().write(frame);
+            connection.getOutputStream().flush();
             return;
         }
 
         String host = route[0];
         String port = route[1];
 
-        java.net.Socket backendConnection = new java.net.Socket(host, Integer.parseInt(port));
+
+        java.net.Socket backendConnection = null;
         try {
+            backendConnection = new java.net.Socket(host, Integer.parseInt(port));
             backendConnection.setSoTimeout(BACKEND_TIME_OUT);
 
             writeDestination = new DataOutputStream(backendConnection.getOutputStream());
 
-            byte[] requestByte = _getByteFrame(request);
+            byte[] requestByte = _getByteFrame(rawRequest);
             writeDestination.write(requestByte);
             writeDestination.flush();
 
@@ -142,24 +178,27 @@ public class Socket {
             byte[] rawResponse = new byte[rawSize];
             readDestination.readFully(rawResponse);
 
-            ObjectMapper mapper = new ObjectMapper();
-            Response response = mapper.readValue(rawResponse, Response.class);
-            byte[] responseBytes = _getByteFrame(response);
+            byte[] responseBytes = _getByteFrame(rawResponse);
 
             connection.getOutputStream().write(responseBytes);
             connection.getOutputStream().flush();
 
-        } catch (Error e) {
-            backendConnection.close();
+        } catch (Error | Exception e) {
 
             Response response = new Response();
             response.setStatus("error");
             response.setId(request.getId());
+            response.setBody("backend issue" + e.getMessage());
 
-            byte[] frame = _getByteFrame(response);
+            byte[] frame = _getByteFrame(mapper.writeValueAsBytes(response));
             connection.getOutputStream().write(frame);
+            connection.getOutputStream().flush();
 
-            connection.close();
+            if (backendConnection == null) {
+                return;
+            }
+            backendConnection.close();
+
         }
     }
 
@@ -183,6 +222,7 @@ public class Socket {
 
                 // Creating the request object
                 Request request = mapper.readValue(rawRequestJson, Request.class);
+                log.log(Level.FINEST, "Request: {0}", request);
                 // Keeping track of the error a bit more
                 ArrayList<String> errors = new ArrayList<>();
 
@@ -204,7 +244,7 @@ public class Socket {
                     response.setBody(errors.toString());
                     response.setStatus("error");
 
-                    byte[] responseByte = _getByteFrame(response);
+                    byte[] responseByte = _getByteFrame(mapper.writeValueAsBytes(response));
 
                     // Logging errors
                     log.log(Level.WARNING, "Error on request json", errors);
@@ -219,7 +259,7 @@ public class Socket {
                 }
 
 
-                _routingRequest(request, client_connection);
+                _routingRequest(request, client_connection, rawRequestJson);
 
 
             } catch (Error | IOException e) {
@@ -227,6 +267,7 @@ public class Socket {
                 client_connection.close();
             }
         }
+
     }
 
 
