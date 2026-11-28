@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")" || exit 1
-mvn compile exec:java -Dexec.mainClass="socket.Socket"
+exec mvn compile exec:java -Dexec.mainClass="socket.Socket" -Dexec.args="${GATEWAY_PORT:-7000}"

@@ -1,0 +1,10 @@
+classpath:/Users/jacky/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.23.0/jackson-databind-2.23.0.jar	1716668:1794098121000
+classpath:/Users/jacky/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.23/jackson-annotations-2.23.jar	84212:1794095929000
+classpath:/Users/jacky/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.23.0/jackson-core-2.23.0.jar	603520:1794096903000
+classpath:/Users/jacky/.m2/repository/org/projectlombok/lombok/1.18.48/lombok-1.18.48.jar	2055065:1788295256000
+classpath:/Users/jacky/.m2/repository/jakarta/validation/jakarta.validation-api/3.1.1/jakarta.validation-api-3.1.1.jar	106136:1738452882000
+classpath:/Users/jacky/.m2/repository/org/hibernate/validator/hibernate-validator/8.0.1.Final/hibernate-validator-8.0.1.Final.jar	1327426:1687278991000
+classpath:/Users/jacky/.m2/repository/org/jboss/logging/jboss-logging/3.4.3.Final/jboss-logging-3.4.3.Final.jar	60782:1641938053000
+classpath:/Users/jacky/.m2/repository/com/fasterxml/classmate/1.5.1/classmate-1.5.1.jar	67815:1571525227000
+classpath:/Users/jacky/.m2/repository/org/glassfish/expressly/expressly/5.0.0/expressly-5.0.0.jar	171797:1659956432000
+classpath:/Users/jacky/.m2/repository/jakarta/el/jakarta.el-api/5.0.0/jakarta.el-api-5.0.0.jar	87908:1645783394000

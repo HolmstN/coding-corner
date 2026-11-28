@@ -1,154 +1,273 @@
 package socket;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.exc.StreamReadException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DatabindException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.cfg.CoercionAction;
+import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
+import com.fasterxml.jackson.databind.type.LogicalType;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
 import model.Request;
 import model.Response;
-import model.Target;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
-import java.util.ArrayList;
-import java.util.Set;
+import java.net.SocketException;
+import java.nio.ByteBuffer;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class Socket{
-    private int port;
-
+public class Socket {
     private static final Logger log = Logger.getLogger(Socket.class.getName());
-    static java.net.Socket userSocket;
-    static java.net.Socket orderSocket;
 
-    static {
+    static Map<String, Object> router = new HashMap<>();
+    static Map<String, String> clients = new HashMap<>();
+
+    static int PORT = Integer.parseInt(Optional.ofNullable(System.getenv("GATEWAY_PORT")).orElseThrow());
+    static int BACKEND_TIME_OUT= Integer.parseInt(Optional.ofNullable(System.getenv("GATEWAY_BACKEND_TIMEOUT_MS")).orElseThrow());
+
+    static int REQUEST_MIN_SIZE = 1;
+    static int REQUEST_MAX_SIZE = 1048576;
+    static ObjectMapper mapper = new ObjectMapper();
+
+    public static void main(String[] args) {
+        // Make this into a Config class later
+
+
+        // Router file
+        String routerFile = System.getenv("GATEWAY_ROUTES");
+
+
         try {
-            userSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9001"));
-            orderSocket = new java.net.Socket("127.0.0.1", Integer.parseInt("9001"));
-        } catch (IOException e) {
-            log.log(Level.WARNING, "Could not create socket");
-            throw new RuntimeException(e);
-        }
-    }
+            router = mapper.readValue(new File(routerFile), new TypeReference<Map<String, Object>>() {
+            });
 
-    public void main(String[] args) {
-
-        if (args.length < 1){
-            throw new IllegalArgumentException();
-        }
-
-        this.port = Integer.parseInt(args[0]);
-        log.info("Socket listening on port " + this.port);
-
-
-        ExecutorService threadPool =  Executors.newCachedThreadPool();
-
-        try (ServerSocket serverSocket = new ServerSocket(port)){
-            while (true){
-                java.net.Socket client_connection = serverSocket.accept();
-                threadPool.execute(_handleRequest(client_connection));
-            }
-
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
-
-    }
-
-    Runnable _routingRequest(Request request, java.net.Socket connection) throws IOException {
-        OutputStream writeDestination = null;
-        BufferedReader readDestination = null;
-        Target destination = request.getTarget();
-        ObjectMapper mapper = new ObjectMapper();
-        if (destination == Target.user){
-            writeDestination = userSocket.getOutputStream();
-            readDestination = new BufferedReader(new InputStreamReader(userSocket.getInputStream()));
-        }
-
-        if (destination == Target.orders){
-            writeDestination = orderSocket.getOutputStream();
-
-            readDestination = new BufferedReader(new InputStreamReader(orderSocket.getInputStream()));
-        }
-
-        if (writeDestination == null || readDestination == null){
-            log.log(Level.WARNING, " stream not matched");
-            throw new IllegalArgumentException();
-        }
-
-        writeDestination.write(mapper.writeValueAsBytes(request));
-        writeDestination.flush();
-
-
-        String raw_response = readDestination.readLine();
-        if (raw_response == null){
-            log.log(Level.WARNING, " response not matched");
-        } else {
-            Response response = mapper.readValue(raw_response, Response.class);
-
-            connection.getOutputStream().write(mapper.writeValueAsBytes(response));
-        }
-
-        return null;
-    };
-
-    Runnable _handleRequest(java.net.Socket client_connection){
-        try {
-
-            DataInputStream stream= new DataInputStream(client_connection.getInputStream());
-            int size = stream.readInt();
-            if (!(1 <= size && size <= 1048576)){
-                log.log(Level.WARNING, " size not matched");
-                client_connection.close();
-            }
-            byte[] raw_request = new byte[size];
-            stream.readFully(raw_request);
-            // Creating the request object
-            ObjectMapper mapper = new ObjectMapper();
-            Request request = mapper.readValue(raw_request, Request.class);
-            // Keeping track of the error a bit more
-            ArrayList<String> errors = new ArrayList<>();
-
-            try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()){
-                Validator validator = factory.getValidator();
-                Set<ConstraintViolation<Request>> violations = validator.validate(request);
-                if (!violations.isEmpty()) {
-                    for (ConstraintViolation<Request> violation : violations) {
-                        errors.add(violation.getMessage());
+            router.forEach((s, o) -> {
+                try {
+                    String[] address = o.toString().split(":");
+                    if (address.length != 2) {
+                        throw new Exception();
                     }
+
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        // Port
+        if (args.length > 0) {
+            PORT = Integer.parseInt(args[0]);
+        }
+
+        // Setting up the mapper for request
+        var textual = mapper.coercionConfigFor(LogicalType.Textual);
+        // Fails every single type that it sees for mapper unless it is string
+        for (CoercionInputShape shape : CoercionInputShape.values()) {
+            // skips over string
+            if (shape != CoercionInputShape.String) {
+                textual.setCoercion(shape, CoercionAction.Fail);
+            }
+        }
+
+        // fails on trailing data
+        mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+
+
+
+        ExecutorService threadPool = Executors.newCachedThreadPool();
+        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+            log.info("Socket listening on port " + serverSocket.getLocalPort());
+            while (true) {
+                java.net.Socket client_connection = serverSocket.accept();
+                threadPool.execute(() -> {
+                    try {
+                        _handleRequest(client_connection);
+                    } catch (Error | IOException e) {
+                        log.log(Level.WARNING, "Socket accept failed", e);
+                    }
+                });
+            }
+
+
+
+        } catch (Error | IOException e) {
+            log.log(Level.WARNING, "Socket accept failed", e);
+        }
+
+    }
+
+
+    static byte[] _getByteFrame(byte[] data) {
+        try {
+            byte[] size = ByteBuffer.allocate(4).putInt(data.length).array();
+            return ByteBuffer.allocate(data.length + size.length).put(size).put(data).array();
+        } catch (Error e) {
+            log.log(Level.WARNING, "ByteFrame fail to create", e);
+            return new byte[]{};
+        }
+    }
+
+    static void _routingRequest(Request request, java.net.Socket connection, byte[] rawRequest) throws IOException {
+        DataOutputStream writeDestination;
+        DataInputStream readDestination;
+        String[] route;
+        try {
+            String target = request.getTarget();
+            route = router.get(target).toString().split(":");
+        } catch (Error | Exception e) {
+            log.log(Level.WARNING, "Invalid target", e);
+
+            Response response = new Response();
+            response.setStatus("error");
+            response.setId(request.getId());
+            response.setBody("backend issue" + e.getMessage());
+
+            byte[] frame = _getByteFrame(mapper.writeValueAsBytes(response));
+            connection.getOutputStream().write(frame);
+            connection.getOutputStream().flush();
+            return;
+        }
+
+        if (route.length != 2) {
+            log.log(Level.WARNING, "Invalid route length");
+            Response response = new Response();
+            response.setStatus("error");
+            response.setId(request.getId());
+            response.setBody("backend issue");
+
+            byte[] frame = _getByteFrame(mapper.writeValueAsBytes(response));
+            connection.getOutputStream().write(frame);
+            connection.getOutputStream().flush();
+            return;
+        }
+
+        String host = route[0];
+        String port = route[1];
+
+
+        java.net.Socket backendConnection = null;
+        try {
+            backendConnection = new java.net.Socket(host, Integer.parseInt(port));
+            backendConnection.setSoTimeout(BACKEND_TIME_OUT);
+
+            writeDestination = new DataOutputStream(backendConnection.getOutputStream());
+
+            byte[] requestByte = _getByteFrame(rawRequest);
+            writeDestination.write(requestByte);
+            writeDestination.flush();
+
+
+            readDestination = new DataInputStream(backendConnection.getInputStream());
+
+            int rawSize = readDestination.readInt();
+            byte[] rawResponse = new byte[rawSize];
+            readDestination.readFully(rawResponse);
+
+            byte[] responseBytes = _getByteFrame(rawResponse);
+
+            connection.getOutputStream().write(responseBytes);
+            connection.getOutputStream().flush();
+
+        } catch (Error | Exception e) {
+
+            Response response = new Response();
+            response.setStatus("error");
+            response.setId(request.getId());
+            response.setBody("backend issue" + e.getMessage());
+
+            byte[] frame = _getByteFrame(mapper.writeValueAsBytes(response));
+            connection.getOutputStream().write(frame);
+            connection.getOutputStream().flush();
+
+            if (backendConnection == null) {
+                return;
+            }
+            backendConnection.close();
+
+        }
+    }
+
+    static void _handleRequest(java.net.Socket client_connection) throws IOException {
+        // The while loop outside only reads connections from a new client, doesn't take in account of an existing client since it is using the same tcp socket connection
+        // Something I just missed
+        while (client_connection.isConnected()) {
+
+            try {
+                DataInputStream stream = new DataInputStream(client_connection.getInputStream());
+                int size = stream.readInt();
+
+                if (!(REQUEST_MIN_SIZE <= size && size <= REQUEST_MAX_SIZE)) {
+                    log.log(Level.WARNING, "Size not supported");
+                    client_connection.close();
                 }
 
-            }
-            OutputStream outputStream = client_connection.getOutputStream();
+                // Setting up the buffer for the request
+                byte[] rawRequestJson = new byte[size];
+                stream.readFully(rawRequestJson);
 
-            if (!errors.isEmpty()){
-                Response response = new Response();
-                response.setId(request.getId() != null ?  request.getId() : "No ID");
-                response.setBody(errors.toString());
-                response.setStatus("error");
-                outputStream.write(mapper.writeValueAsBytes(response));
+                // Creating the request object
+                Request request = mapper.readValue(rawRequestJson, Request.class);
+                log.log(Level.FINEST, "Request: {0}", request);
+                // Keeping track of the error a bit more
+                ArrayList<String> errors = new ArrayList<>();
 
-                // Logging errors
-                log.log(Level.WARNING, "Error on request json", errors);
+                try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
+                    Validator validator = factory.getValidator();
+                    Set<ConstraintViolation<Request>> violations = validator.validate(request);
+                    if (!violations.isEmpty()) {
+                        for (ConstraintViolation<Request> violation : violations) {
+                            errors.add(violation.getMessage());
+                        }
+                    }
+                    log.log(Level.WARNING, errors.toString());
+                }
 
-                outputStream.flush();
+
+                DataOutputStream outputStream = new DataOutputStream(client_connection.getOutputStream());
+                if (!errors.isEmpty()) {
+                    Response response = new Response();
+                    response.setBody(errors.toString());
+                    response.setStatus("error");
+
+                    byte[] responseByte = _getByteFrame(mapper.writeValueAsBytes(response));
+
+                    // Logging errors
+                    log.log(Level.WARNING, "Error on request json", errors);
+                    outputStream.write(responseByte);
+                    outputStream.flush();
+                    client_connection.close();
+                    return;
+                }
+
+                if (request.getId() != null && !clients.containsKey(request.getId())) {
+                    clients.put(request.getId(), client_connection.getRemoteSocketAddress().toString());
+                }
+
+
+                _routingRequest(request, client_connection, rawRequestJson);
+
+
+            } catch (Error | IOException e) {
+                log.log(Level.WARNING, "Socket accept failed", e);
                 client_connection.close();
             }
-
-            _routingRequest(request, client_connection);
-
-
-
-
-        } catch (IOException e) {
-            throw new RuntimeException(e);
         }
-        return null;
+
     }
 
 
